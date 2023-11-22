@@ -72,7 +72,7 @@ class Estimation(object):
         weights = 1/(meas+self.wreg)
         
         errf = partial(errfunc, pupil=pupil, meas=meas, wavelengths=self.model.wavelengths,
-               fresnel_TFs=self.model.fresnel_TFs, Mx=self.model.Mx, My=self.model.My, weights=weights, modes=self.modes, fit_amp=self.estimate_amplitude)
+               fresnel_TFs=self.model.fresnel_TFs, Mx=self.model.Mx, My=self.model.My, weights=weights, Np=self.model.Np, modes=self.modes, fit_amp=self.estimate_amplitude)
         valgrad = value_and_grad(errf)
         
         # to do: fix me -- currently hard-coded to phase-only case
@@ -109,12 +109,11 @@ class Estimation(object):
         # to do: this returns phase in um (for mysterious scaling reasons) -- fix me!
         return jnp.stack(sols, axis=0), errors
 
-def errfunc(params, pupil, meas, wavelengths, fresnel_TFs, Mx, My, weights, fit_amp=False, modes=None):
+def errfunc(params, pupil, meas, wavelengths, fresnel_TFs, Mx, My, weights, Np, fit_amp=False, modes=None):
 
     # forward model
-    Np = len(pupil)
     if modes is None:
-        opd_map = params[:Np*Np].reshape(pupil.shape) #gauss_convolve(phi_map.at[fitmask].set(params), gauss)
+        opd_map = params[:Np*Np].reshape((Np,Np)) #gauss_convolve(phi_map.at[fitmask].set(params), gauss)
     else:
         opd_map = jnp.sum(params[:len(modes),None,None]*modes,axis=0)
         
