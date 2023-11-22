@@ -1,4 +1,4 @@
-Auto-differentiation phase retrieval in JAX
+Auto-differentiation broadband phase retrieval in JAX
 
 ![image](https://github.com/kvangorkom/adpr/assets/9747236/73668f1d-d845-4db3-ab07-1004dcca8657)
 
