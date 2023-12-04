@@ -8,7 +8,7 @@ import jax.numpy as jnp
 from .utils import get_scaled_coords
 
 class ForwardModel(object):
-    def __init__(self, Np, Nf, fnum, pix_m, reference_wavelength, wavelengths, dz):
+    def __init__(self, Np, Nf, fnum, pix_m, reference_wavelength, wavelengths, dz, spectrum=1):
         '''
         To do: generalize this to specify model in different ways
         (pass in q rather than pix_m, RMS defocus or waves rather than dz, etc)
@@ -21,6 +21,7 @@ class ForwardModel(object):
         self.reference_wavelength = reference_wavelength
         self.dz = dz
         self.q = get_q(reference_wavelength, fnum, pix_m)
+        self.spectrum = spectrum
 
         self.Mx = self.My = self.fresnel_TFs = self.pupil_coord = None
         
@@ -42,9 +43,9 @@ class ForwardModel(object):
             fc_wave = get_focal_coords(self.Nf, wave, self.fnum, self.pix_m)
 
             # MFT
-            Mx, My = get_MFT_matrices(fc_wave, pupil_coord)
-            Mx_wave.append(Mx / (1j*wave)) # double-check this scaling
-            My_wave.append(My / (1j*wave))
+            Mx, My = get_MFT_matrices(fc_wave, pupil_coord, norm_factor=self.q)
+            Mx_wave.append(Mx)# / (1j*wave)) # double-check this scaling
+            My_wave.append(My)# / (1j*wave))
 
             # get wavelength-dependent fresnel TFs
             fresnel_TFs_wave.append( jnp.array([get_fresnel_TF(z, self.Np, wave, self.fnum) for z in self.dz]) )
@@ -56,17 +57,30 @@ class ForwardModel(object):
         self.pupil_coord = pupil_coord
 
 @jax.jit
+def forward_propagate(pupil, opd, wavelengths, fresnel_TFs, Mx, My, spectrum=None):
+    if spectrum is None:
+        spectrum = jnp.ones(len(wavelengths))
+    allI = []
+    for i, wave in enumerate(wavelengths):
+        phase = 2 * jnp.pi / wave * opd
+        allI.append(spectrum[i] * jnp.abs(propagate_MFT( fresnel_TFs[i] * pupil * jnp.exp(1j*phase),
+                                                          Mx[i], My[i]))**2)
+    return jnp.sum(jnp.array(allI),axis=0)
+
+'''
+# hacky way of quickly testing wavelength diversity
+@jax.jit
 def forward_propagate(pupil, opd, wavelengths, fresnel_TFs, Mx, My):
     allI = []
     for i, wave in enumerate(wavelengths):
         phase = 2 * jnp.pi / wave * opd
         allI.append(jnp.abs(propagate_MFT( fresnel_TFs[i] * pupil * jnp.exp(1j*phase),
                                 Mx[i], My[i]))**2)
-    return jnp.sum(jnp.array(allI),axis=0)
+    return jnp.concatenate( [jnp.sum(jnp.array(allI[:15]),axis=0), jnp.sum(jnp.array(allI[15:30]),axis=0), jnp.sum(jnp.array(allI[30:]),axis=0)], axis=0)'''
 
 def propagate_MFT(E, Mx, My):
     ''' This is the dz x X x Y version'''
-    return jnp.einsum('ijk,lj->ikl', jnp.einsum('ijk,kl->ijl', E, Mx), My)
+    return jnp.einsum('ijl,jk->ikl', jnp.einsum('ijk,lk->ijl', E, My), Mx)
 
 def get_q(wavelength, fnum, pix_m):
     return wavelength * fnum / pix_m
@@ -92,12 +106,12 @@ def get_fresnel_TF(dz, N, wavelength, fnum):
     rp = get_scaled_coords(N,df, shift=False)[-1]
     return jnp.exp(-1j*jnp.pi*dz*wavelength*(rp**2))
 
-def get_MFT_matrices(focal_coord, pupil_coord):
+def get_MFT_matrices(focal_coord, pupil_coord, norm_factor=1):
     vy = jnp.outer(focal_coord, pupil_coord)
     xu = jnp.outer(pupil_coord, focal_coord)
     
     # check me
-    norm = jnp.sqrt(len(focal_coord)**2 + len(pupil_coord)**2)
+    norm = jnp.sqrt(len(pupil_coord) * norm_factor)
     My = jnp.exp(-1j*2*jnp.pi*vy) / norm 
     Mx = jnp.exp(-1j*2*jnp.pi*xu) / norm
     
