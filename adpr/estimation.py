@@ -10,16 +10,21 @@ from jaxopt import LBFGS, LBFGSB
 from .utils import get_gauss, gauss_convolve
 from .model import forward_propagate
 
+LBFGSB_kwargs = {'maxls' : 100, 'history_size' : 10, 'tol' : 1e-4}
+
 class Estimation(object):
     
-    def __init__(self, forward_model, estimate_phase=True, estimate_amplitude=False, phase_modal=False, amplitude_modal=False, wreg=1e-2, modes=None, method=LBFGSB, maxiter=100):
+    def __init__(self, forward_model, estimate_phase=True, estimate_amplitude=False, estimate_spectrum=False, estimate_bg=False, phase_modal=False, amplitude_modal=False, wreg=1e-2, modes=None, method=LBFGSB, method_kwargs=LBFGSB_kwargs, maxiter=100):
         self.forward_model = forward_model
         self.method = method
+        self.method_kwargs = method_kwargs
         self.wreg = wreg
         self.model = forward_model
         
         self.estimate_phase = estimate_phase
         self.estimate_amplitude = estimate_amplitude
+        self.estimate_spectrum = estimate_spectrum
+        self.estimate_bg = estimate_bg
         self.phase_modal = phase_modal
         self.amplitude_modal = amplitude_modal
         
@@ -59,34 +64,47 @@ class Estimation(object):
                 init.extend([1.,]*self.model.Np*self.model.Np)
                 bounds[0].extend([0.,]*self.model.Np*self.model.Np)
                 bounds[1].extend([jnp.inf,]*self.model.Np*self.model.Np)
+
+        if self.estimate_spectrum:
+            init.extend([0,])
+            bounds[0].extend([0])
+            bounds[1].extend([jnp.inf])
+
+        if self.estimate_bg:
+            init.extend([0,])
+            bounds[0].extend([0])
+            bounds[1].extend([jnp.inf])
                 
         self.init = jnp.array(init)
         self.bounds = jnp.array(bounds)
          
-    def run(self, measured, pupil=None):
+    def run(self, measured, pupil=None, spectrum=None, weights=None):
 
         if (not self.estimate_amplitude) and (pupil is None):
             raise ValueError('A pupil transmission function must be supplied when not fitting the amplitude!')
         
         meas = jnp.asarray(measured) / jnp.max(measured,axis=(-2,-1))[:,None,None]
-        weights = 1/(meas+self.wreg)
+        if weights is None:
+            weights = 1/(meas+self.wreg)
+        meas = meas - jnp.mean(meas,axis=(-2,-1))[:,None,None]
         
         errf = partial(errfunc, pupil=pupil, meas=meas, wavelengths=self.model.wavelengths,
-               fresnel_TFs=self.model.fresnel_TFs, Mx=self.model.Mx, My=self.model.My, weights=weights, Np=self.model.Np, modes=self.modes, fit_amp=self.estimate_amplitude)
+               fresnel_TFs=self.model.fresnel_TFs, Mx=self.model.Mx, My=self.model.My, weights=weights, Np=self.model.Np,
+               modes=self.modes, fit_amp=self.estimate_amplitude, fit_spectrum=self.estimate_spectrum, fit_bg=self.estimate_bg, spectrum=spectrum)
         valgrad = value_and_grad(errf)
         
         # to do: fix me -- currently hard-coded to phase-only case
         def errf_grad(params, gauss_ph):
             val, grad = valgrad(params)
             Np = self.model.Np
-            grad_sq = gauss_convolve(grad[:Np*Np].reshape((self.model.Np,self.model.Np)), gauss_ph)
-            if not self.estimate_amplitude:
+            grad_sq = gauss_convolve(grad[:Np*Np].reshape((Np,Np)), gauss_ph)
+            if (not self.estimate_amplitude) and (not self.estimate_spectrum) and (not self.estimate_bg):
                 grad = grad_sq.flatten()
             else:
                 grad = jnp.concatenate([grad_sq.flatten(), grad[Np*Np:].flatten()],axis=0)
             return val, grad
         
-        solver = self.method(errf_grad, value_and_grad=True, maxiter=self.maxiter, maxls=100, history_size=10, tol=1e-4, verbose=False)
+        solver = self.method(fun=errf_grad, value_and_grad=True, maxiter=self.maxiter, **self.method_kwargs)
 
         return self._run(solver)
     
@@ -94,7 +112,7 @@ class Estimation(object):
         gauss_ph = jnp.array(get_gauss(self.gauss_init, (self.model.Np, self.model.Np)))
         state = solver.init_state(self.init, self.bounds, gauss_ph, *args, **kwargs)
         sol = self.init
-        sols, errors = [sol], [state.error]
+        sols, errors, vals = [sol], [state.error], [state.value]
         update = lambda sol,state,gauss_ph: solver.update(sol, state, self.bounds, gauss_ph=gauss_ph, *args, **kwargs)
         jitted_update = jax.jit(update)
         for i in range(solver.maxiter):
@@ -105,33 +123,53 @@ class Estimation(object):
             sol, state = jitted_update(sol, state, gauss_ph=gauss_ph)
             sols.append(sol)
             errors.append(state.error)
+            vals.append(state.value)
             
         # to do: this returns phase in um (for mysterious scaling reasons) -- fix me!
-        return jnp.stack(sols, axis=0), errors
+        return jnp.stack(sols, axis=0), errors, vals
 
-def errfunc(params, pupil, meas, wavelengths, fresnel_TFs, Mx, My, weights, Np, fit_amp=False, modes=None):
+def errfunc(params, pupil, meas, wavelengths, fresnel_TFs, Mx, My, weights, Np, fit_amp=False, fit_spectrum=False, fit_bg=False, modes=None, spectrum=None):
 
     # forward model
+    idx = 0
     if modes is None:
         opd_map = params[:Np*Np].reshape((Np,Np)) #gauss_convolve(phi_map.at[fitmask].set(params), gauss)
+        idx = Np*Np
     else:
         opd_map = jnp.sum(params[:len(modes),None,None]*modes,axis=0)
+        idx = len(modes)
         
-    if fit_amp: # eventually handle modal fit
-        amp = params[-Np*Np:].reshape(opd_map.shape)
+    if fit_amp: # eventually handle modal amplitude fit?
+        amp = params[idx:idx+Np*Np].reshape(opd_map.shape)
+        idx = idx + Np*Np
     else:
         amp = pupil
-    
-    Ik = forward_propagate(amp, opd_map * 1e-6, wavelengths, fresnel_TFs, Mx, My)
-    #Ik = forward_model(pupil, opd_map, wavelengths, mq['fnum'], mq['pix_m'], mq['dz'], mq['Np'], mq['Nf'], model_quantities=mq)
-    #return Ik
-    
+
+    if fit_spectrum:
+        spec_val = params[idx:idx+1] # not actually a slope
+        idx = idx + 1
+        spectrum = jnp.linspace(1, spec_val, num=len(wavelengths)) # linear, pinned to 1 at wavelength[0]
+    else:
+        spectrum = spectrum
+
+    if fit_bg: # not implemented! (and probably shouldn't be)
+        bg = params[idx:idx+1]
+        idx = idx + 1
+    else:
+        bg = 0
+
+    Ik = forward_propagate(amp, opd_map * 1e-6, wavelengths, fresnel_TFs, Mx, My, spectrum=spectrum)
+    Ik = Ik - jnp.mean(Ik,axis=(-2,-1))[:,None,None]
+    #Ik /= jnp.max(Ik,axis=(-2,-1))[:,None,None]
+
     # error function
     err = get_err(meas, Ik, weights)
+    #err = jnp.sum(weights*(Ik - meas)**2)
 
     return err
 
 def get_err(Imeas, Imodel, weights):
+    '''1 - weighted correlation coefficient (provided that Imeas, Imodel are mean-substracted)'''
     #return jnp.sum(weights*(Imeas - Imodel)**2)
     K = len(weights)
     t1 = jnp.sum(weights * Imodel * Imeas, axis=(-2,-1))**2
