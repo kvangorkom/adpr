@@ -94,7 +94,7 @@ class Estimation(object):
         valgrad = value_and_grad(errf)
         
         # to do: fix me -- currently hard-coded to phase-only case
-        def errf_grad(params, gauss_ph):
+        def errf_grad(params, *args, gauss_ph=None):
             val, grad = valgrad(params)
             Np = self.model.Np
             grad_sq = gauss_convolve(grad[:Np*Np].reshape((Np,Np)), gauss_ph)
@@ -110,7 +110,7 @@ class Estimation(object):
     
     def _run(self, solver, *args, **kwargs):
         gauss_ph = jnp.array(get_gauss(self.gauss_init, (self.model.Np, self.model.Np)))
-        state = solver.init_state(self.init, self.bounds, gauss_ph, *args, **kwargs)
+        state = solver.init_state(self.init, self.bounds, gauss_ph=gauss_ph, *args, **kwargs)
         sol = self.init
         sols, errors, vals = [sol], [state.error], [state.value]
         update = lambda sol,state,gauss_ph: solver.update(sol, state, self.bounds, gauss_ph=gauss_ph, *args, **kwargs)
