@@ -14,7 +14,7 @@ LBFGSB_kwargs = {'maxls' : 100, 'history_size' : 10, 'tol' : 1e-4}
 
 class Estimation(object):
     
-    def __init__(self, forward_model, estimate_phase=True, estimate_amplitude=False, estimate_spectrum=False, estimate_bg=False, phase_modal=False, amplitude_modal=False, wreg=1e-2, modes=None, method=LBFGSB, method_kwargs=LBFGSB_kwargs, maxiter=100):
+    def __init__(self, forward_model, estimate_phase=True, estimate_amplitude=False, estimate_spectrum=False, estimate_bg=False, phase_modal=False, amplitude_modal=False, wreg=1e-2, modes=None, modes_tiptilt=None, method=LBFGSB, method_kwargs=LBFGSB_kwargs, maxiter=100):
         self.forward_model = forward_model
         self.method = method
         self.method_kwargs = method_kwargs
@@ -33,6 +33,8 @@ class Estimation(object):
             self.nmodes = len(modes)
         else:
             self.nmodes = None
+
+        self.modes_tiptilt = modes_tiptilt
         
         # to do: don't hardcode these things!
         self.gauss_init = 0.1
@@ -74,7 +76,13 @@ class Estimation(object):
             init.extend([0,])
             bounds[0].extend([0])
             bounds[1].extend([jnp.inf])
-                
+            
+        if self.modes_tiptilt is not None:
+            nparams = 2*len(self.forward_model.dz)
+            init.extend([0,]*nparams)
+            bounds[0].extend([-jnp.inf,]*nparams)
+            bounds[1].extend([jnp.inf,]*nparams)
+
         self.init = jnp.array(init)
         self.bounds = jnp.array(bounds)
          
@@ -90,12 +98,14 @@ class Estimation(object):
         
         errf = partial(errfunc, pupil=pupil, meas=meas, wavelengths=self.model.wavelengths,
                fresnel_TFs=self.model.fresnel_TFs, Mx=self.model.Mx, My=self.model.My, weights=weights, Np=self.model.Np,
-               modes=self.modes, fit_amp=self.estimate_amplitude, fit_spectrum=self.estimate_spectrum, fit_bg=self.estimate_bg, spectrum=spectrum)
+               modes=self.modes, modes_tiptilt=self.modes_tiptilt, fit_amp=self.estimate_amplitude, fit_spectrum=self.estimate_spectrum,
+               fit_bg=self.estimate_bg, spectrum=spectrum)
         valgrad = value_and_grad(errf)
         
         # to do: fix me -- currently hard-coded to phase-only case
         def errf_grad(params, *args, gauss_ph=None):
             val, grad = valgrad(params)
+            return val, grad
             Np = self.model.Np
             grad_sq = gauss_convolve(grad[:Np*Np].reshape((Np,Np)), gauss_ph)
             if (not self.estimate_amplitude) and (not self.estimate_spectrum) and (not self.estimate_bg):
@@ -128,7 +138,7 @@ class Estimation(object):
         # to do: this returns phase in um (for mysterious scaling reasons) -- fix me!
         return jnp.stack(sols, axis=0), errors, vals
 
-def errfunc(params, pupil, meas, wavelengths, fresnel_TFs, Mx, My, weights, Np, fit_amp=False, fit_spectrum=False, fit_bg=False, modes=None, spectrum=None):
+def errfunc(params, pupil, meas, wavelengths, fresnel_TFs, Mx, My, weights, Np, fit_amp=False, fit_spectrum=False, fit_bg=False, modes=None, modes_tiptilt=None, spectrum=None):
 
     # forward model
     idx = 0
@@ -157,6 +167,10 @@ def errfunc(params, pupil, meas, wavelengths, fresnel_TFs, Mx, My, weights, Np, 
         idx = idx + 1
     else:
         bg = 0
+
+    if modes_tiptilt is not None:
+        tt_params = params[-2*len(meas):].reshape((2,len(meas)))
+        opd_map = opd_map + jnp.einsum('ij,ikl->jkl', tt_params, modes_tiptilt)
 
     Ik = forward_propagate(amp, opd_map * 1e-6, wavelengths, fresnel_TFs, Mx, My, spectrum=spectrum)
     Ik = Ik - jnp.mean(Ik,axis=(-2,-1))[:,None,None]
