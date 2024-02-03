@@ -78,7 +78,7 @@ class Estimation(object):
         self.init = jnp.array(init)
         self.bounds = jnp.array(bounds)
          
-    def run(self, measured, pupil=None, spectrum=None, weights=None):
+    def run(self, measured, pupil=None, spectrum=None, weights=None, modalfit = False):
 
         if (not self.estimate_amplitude) and (pupil is None):
             raise ValueError('A pupil transmission function must be supplied when not fitting the amplitude!')
@@ -96,14 +96,17 @@ class Estimation(object):
         # to do: fix me -- currently hard-coded to phase-only case
         def errf_grad(params, *args, gauss_ph=None):
             val, grad = valgrad(params)
-            Np = self.model.Np
-            grad_sq = gauss_convolve(grad[:Np*Np].reshape((Np,Np)), gauss_ph)
-            if (not self.estimate_amplitude) and (not self.estimate_spectrum) and (not self.estimate_bg):
-                grad = grad_sq.flatten()
+            if modalfit:
+                return val, grad
             else:
-                grad = jnp.concatenate([grad_sq.flatten(), grad[Np*Np:].flatten()],axis=0)
-            return val, grad
-        
+                Np = self.model.Np
+                grad_sq = gauss_convolve(grad[:Np*Np].reshape((Np,Np)), gauss_ph)
+                if (not self.estimate_amplitude) and (not self.estimate_spectrum) and (not self.estimate_bg):
+                    grad = grad_sq.flatten()
+                else:
+                    grad = jnp.concatenate([grad_sq.flatten(), grad[Np*Np:].flatten()],axis=0)
+                return val, grad
+
         solver = self.method(fun=errf_grad, value_and_grad=True, maxiter=self.maxiter, **self.method_kwargs)
 
         return self._run(solver)
