@@ -70,4 +70,4 @@ def get_gauss(sigma, shape, cenyx=None):
         cenyx = jnp.asarray([(shape[0])/2., (shape[1])/2.]) # no -1
     yy, xx = jnp.indices(shape).astype(float) - cenyx[:,None,None]
     g = jnp.exp(-0.5*(yy**2+xx**2)/sigma**2)
-    return g / jnp.sum(g)
+    return g #/ jnp.sum(g)
